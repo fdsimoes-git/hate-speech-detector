@@ -37,7 +37,7 @@ def analyze(
         # Step 2: Transcribe
         from hate_speech_detector.transcriber import transcribe
 
-        segments = transcribe(audio_path, model_name=model, language=language)
+        segments, detected_language = transcribe(audio_path, model_name=model, language=language)
 
         gc.collect()
 
@@ -68,6 +68,7 @@ def analyze(
             segments_total=len(segments),
             segments_flagged=flagged_count,
             classifications=classifications,
+            language=detected_language,
         )
     finally:
         try:

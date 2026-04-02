@@ -171,6 +171,8 @@ def print_report(report: AnalysisReport, verbose: bool = False) -> None:
     console.print(f"  [dim]{'Source':<10}[/dim] {report.source_file}")
     console.print(f"  [dim]{'Duration':<10}[/dim] {_format_time(report.duration_seconds)}")
     console.print(f"  [dim]{'Model':<10}[/dim] {report.whisper_model}")
+    if report.language:
+        console.print(f"  [dim]{'Language':<10}[/dim] {report.language}")
 
     flagged_style = "bold red" if report.segments_flagged > 0 else "green"
     console.print(

@@ -51,12 +51,16 @@ def _split_long_segment(segment: TranscriptSegment, max_chars: int = 1500) -> li
     return chunks if chunks else [segment]
 
 
-def transcribe(audio_path: Path, model_name: str = "small", language: str | None = None) -> list[TranscriptSegment]:
+def transcribe(
+    audio_path: Path, model_name: str = "small", language: str | None = None
+) -> tuple[list[TranscriptSegment], str]:
     """Transcribe audio to timestamped segments using Whisper.
 
     Tries mlx-whisper (Apple Silicon optimized) first, falls back to openai-whisper.
+    Returns (segments, detected_language).
     """
     result = _transcribe_with_whisper(audio_path, model_name, language)
+    detected_language = result.get("language", language or "unknown")
 
     segments: list[TranscriptSegment] = []
     for raw in result.get("segments", []):
@@ -68,7 +72,7 @@ def transcribe(audio_path: Path, model_name: str = "small", language: str | None
         )
         segments.extend(_split_long_segment(seg))
 
-    return segments
+    return segments, detected_language
 
 
 def _transcribe_with_whisper(audio_path: Path, model_name: str, language: str | None = None) -> dict:

@@ -6,16 +6,17 @@ from hate_speech_detector.transcriber import transcribe, _split_long_segment
 
 
 MOCK_WHISPER_RESULT = {
+    "language": "en",
     "segments": [
         {"id": 0, "start": 0.0, "end": 5.5, "text": " Hello world."},
         {"id": 1, "start": 5.5, "end": 12.3, "text": " This is a test segment."},
-    ]
+    ],
 }
 
 
 @patch("hate_speech_detector.transcriber._transcribe_with_whisper", return_value=MOCK_WHISPER_RESULT)
 def test_transcribe_returns_segments(mock_whisper):
-    segments = transcribe(Path("audio.wav"), model_name="small")
+    segments, lang = transcribe(Path("audio.wav"), model_name="small")
 
     assert len(segments) == 2
     assert isinstance(segments[0], TranscriptSegment)
@@ -24,12 +25,14 @@ def test_transcribe_returns_segments(mock_whisper):
     assert segments[0].end == 5.5
     assert segments[0].text == "Hello world."
     assert segments[1].text == "This is a test segment."
+    assert lang == "en"
 
 
 @patch("hate_speech_detector.transcriber._transcribe_with_whisper", return_value={"segments": []})
 def test_transcribe_empty(mock_whisper):
-    segments = transcribe(Path("audio.wav"))
+    segments, lang = transcribe(Path("audio.wav"))
     assert segments == []
+    assert lang == "unknown"
 
 
 @patch("hate_speech_detector.transcriber._transcribe_with_whisper", return_value=MOCK_WHISPER_RESULT)

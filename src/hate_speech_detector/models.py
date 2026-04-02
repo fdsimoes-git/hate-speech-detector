@@ -58,10 +58,11 @@ class AnalysisReport:
     segments_total: int
     segments_flagged: int
     classifications: list[SegmentClassification]
+    language: str = ""
     generated_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "source_file": self.source_file,
             "duration_seconds": self.duration_seconds,
             "whisper_model": self.whisper_model,
@@ -70,3 +71,6 @@ class AnalysisReport:
             "classifications": [c.to_dict() for c in self.classifications],
             "generated_at": self.generated_at,
         }
+        if self.language:
+            d["language"] = self.language
+        return d
