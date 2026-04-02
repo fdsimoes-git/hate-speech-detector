@@ -1,43 +1,53 @@
 # hate-speech-detector
 
-A command-line tool that analyzes video files for hate speech content. It extracts audio, transcribes it using Whisper, and classifies each segment using a multilingual zero-shot NLI (Natural Language Inference) model to detect racism, sexism, homophobia, religious intolerance, ableism, and xenophobia — with timestamped probability scores.
+A command-line tool that analyzes video files for hate speech content. It extracts audio, transcribes it using Whisper, and uses a hybrid approach — multilingual embeddings for fast pre-filtering, then Claude LLM for reasoning-based verification — to detect racism, sexism, homophobia, religious intolerance, ableism, and xenophobia with timestamped scores.
 
 ## How it works
 
 ```
-Video file
+Video file or YouTube URL
     |
     v
-[ffmpeg] ──> Extract audio (16kHz mono WAV)
+[yt-dlp] ──> (if URL) Download audio-only stream
+    |
+    v
+[ffmpeg] ──> Extract/convert audio (16kHz mono WAV)
     |
     v
 [Whisper] ──> Transcribe speech to timestamped segments
     |
     v
-[mDeBERTa NLI] ──> Classify each segment against hate speech categories
+[Embeddings] ──> Pre-filter: cosine similarity against hate speech references
+    |
+    v (optional, --verify)
+[Claude LLM] ──> Verify: reasoning-based analysis of flagged candidates
     |
     v
-Formatted report with scores per category
+Formatted report with timeline, scores, categories, and reasoning
 ```
 
-1. **Audio extraction** — ffmpeg converts the video to a 16kHz mono WAV file
-2. **Transcription** — Whisper (via [mlx-whisper](https://github.com/ml-explore/mlx-examples/tree/main/whisper) on Apple Silicon) transcribes speech into timestamped text segments
-3. **Classification** — Each segment (with surrounding context from neighboring segments) is evaluated by a zero-shot NLI classifier ([mDeBERTa-v3-base-xnli-multilingual-nli-2mil7](https://huggingface.co/MoritzLaurer/mDeBERTa-v3-base-xnli-multilingual-nli-2mil7)) against six hate speech categories
-4. **Reporting** — Results are displayed as a color-coded terminal report with score bars, and optionally exported as JSON
+1. **Input** — Accepts a local video file or a YouTube URL. For URLs, yt-dlp downloads only the audio stream (no video stored on disk).
+2. **Audio extraction** — ffmpeg converts the audio to a 16kHz mono WAV file
+3. **Transcription** — Whisper (via [mlx-whisper](https://github.com/ml-explore/mlx-examples/tree/main/whisper) on Apple Silicon) transcribes speech into timestamped text segments
+4. **Embedding pre-filter** — Each segment (with context from neighboring segments) is encoded using a multilingual sentence-transformer and scored via cosine similarity against multiple reference texts per hate speech category. Segments above the pre-filter threshold (0.10) become candidates.
+5. **LLM verification** (with `--verify`) — Candidate segments are sent to Claude for reasoning-based analysis. The LLM evaluates cultural context, coded language, dog whistles, and implied meaning — catching what embeddings miss and eliminating false positives.
+6. **Reporting** — Results include a color-coded timeline showing where hate speech occurs, detailed panels with score bars and LLM reasoning, and optional JSON export.
 
-### Why NLI instead of keyword matching or embeddings?
+### Why hybrid instead of embeddings alone?
 
-The NLI model evaluates whether a text **entails** a hypothesis like *"This text contains racist speech."* This means it catches **implied** hate speech — not just slurs, but dehumanizing language, dog whistles, and coded prejudice — across any language the model supports.
+Embeddings measure **surface similarity** — they can tell that a text is *near* hate speech references, but they can't reason about context. For example, "o afrodescendente mais leve pesava sete arrobas" (comparing Black people to cattle using livestock weight units) requires cultural knowledge to recognize as dehumanizing. The LLM verification step provides this reasoning capability while embeddings keep the process fast by filtering out clearly irrelevant segments.
 
 ### Context window
 
-Short segments like *"They don't do anything"* are harmless in isolation but hateful when preceded by *"Those indigenous communities..."*. Each segment is scored with its neighboring segments concatenated, so the model sees the full conversational context. The report shows both the individual segment and the context that was scored.
+Short segments like *"They don't do anything"* are harmless in isolation but hateful when preceded by *"Those indigenous communities..."*. Each segment is scored with its neighboring segments concatenated, so both the embedding model and the LLM see the full conversational context.
 
 ## Requirements
 
 - **Python** >= 3.11
 - **ffmpeg** — `brew install ffmpeg` (macOS) or `apt install ffmpeg` (Linux)
+- **yt-dlp** (optional) — `brew install yt-dlp` — required only for analyzing YouTube URLs
 - ~2GB disk space for model downloads (cached after first run)
+- **Claude CLI** or **Anthropic API key** (only for `--verify` mode) — by default uses the `claude` CLI (your Claude subscription). Or pass `--api-key` / set `ANTHROPIC_API_KEY` for direct API access.
 
 ### Hardware
 
@@ -47,7 +57,7 @@ Runs on CPU or Apple Silicon GPU (MPS). Tested on MacBook Pro M3 with 8GB RAM. M
 
 ```bash
 # Clone the repository
-git clone https://github.com/felipesimoes/hate-speech-detector.git
+git clone https://github.com/fdsimoes-git/hate-speech-detector.git
 cd hate-speech-detector
 
 # Install with uv (recommended)
@@ -60,23 +70,38 @@ pip install .
 ## Usage
 
 ```bash
-# Basic usage
+# Basic usage (embedding-only, no API key needed)
 hate-speech-detector video.mp4
 
+# Analyze a YouTube video directly (no video stored on disk)
+hate-speech-detector "https://www.youtube.com/watch?v=VIDEO_ID" --language pt --verify
+
+# With LLM verification for higher accuracy
+hate-speech-detector video.mp4 --verify
+
 # Specify language for better transcription accuracy
-hate-speech-detector video.mp4 --language pt
+hate-speech-detector video.mp4 --language pt --verify
 
 # Use a larger Whisper model for non-English content
-hate-speech-detector video.mp4 --language pt --model large-v3
+hate-speech-detector video.mp4 --language pt --model large-v3 --verify
 
 # Lower threshold to catch more subtle cases
 hate-speech-detector video.mp4 --threshold 0.3
 
 # Show all segments, not just flagged ones
-hate-speech-detector video.mp4 --verbose
+hate-speech-detector video.mp4 --verbose --verify
 
 # Export full report as JSON
-hate-speech-detector video.mp4 --json report.json
+hate-speech-detector video.mp4 --json report.json --verify
+
+# With LLM verification — uses `claude` CLI (your Claude subscription, no API key needed)
+hate-speech-detector video.mp4 --verify
+
+# Or use a direct API key instead
+hate-speech-detector video.mp4 --verify --api-key sk-ant-...
+
+# Add custom reference texts to improve detection
+hate-speech-detector video.mp4 --references custom_refs.json --verify
 
 # Force CPU if MPS causes issues
 hate-speech-detector video.mp4 --device cpu
@@ -86,54 +111,84 @@ hate-speech-detector video.mp4 --device cpu
 
 | Option | Description | Default |
 |---|---|---|
-| `video_file` | Path to video file to analyze | (required) |
+| `video_file` | Path to video file or YouTube URL | (required) |
 | `--model` | Whisper model size: `tiny`, `small`, `medium`, `large-v3` | `small` |
 | `--language` | Language code (e.g., `pt`, `en`, `es`). Auto-detects if omitted | auto |
-| `--threshold` | Detection threshold 0.0–1.0. Lower = more sensitive | `0.5` |
+| `--threshold` | Detection threshold 0.0–1.0. Lower = more sensitive | `0.20` |
+| `--verify` | Enable Claude LLM verification of flagged segments | off |
+| `--api-key` | Anthropic API key for `--verify`. If omitted, uses `claude` CLI instead | — |
+| `--references` | JSON file with custom reference texts to extend categories | — |
 | `--json PATH` | Write full JSON report to file | — |
 | `--verbose` | Show all segments, not just flagged ones | off |
 | `--device` | Compute device: `mps` (Apple Silicon) or `cpu` | `mps` |
 
 ### Choosing a threshold
 
-- **0.5** (default) — flags clear, unambiguous hate speech
-- **0.3–0.4** — catches more subtle or implied cases, with some false positives
-- **0.2** — very sensitive, useful for screening
+- **0.20** (default) — balanced sensitivity for the embedding pre-filter
+- **0.10–0.15** — more sensitive pre-filter, sends more candidates to LLM verification
+- **0.30+** — less sensitive, only obvious matches. Good for embedding-only mode without `--verify`
+
+### Custom references
+
+You can extend or add categories with a JSON file:
+
+```json
+{
+  "racism": [
+    "using weight units for livestock to describe people of a certain race",
+    "referring to Black people using cattle or farm animal terminology"
+  ],
+  "political_extremism": [
+    "calls for political violence, armed uprising, or overthrowing a government"
+  ]
+}
+```
+
+Custom references are merged with the built-in ones. New category names (like `political_extremism`) create new detection categories.
 
 ## Example output
 
 ```
 hate-speech-detector
 
-  ✓ Audio extracted
-  ✓ 45 segments transcribed
-  ✓ Classification model loaded
-  ✓ Classification complete: 3 flagged
+  ✔ Audio extracted
+  ✔ 13 segments transcribed
+  ✔ Classification model loaded
+  ✔ Embedding pre-filter: 13 candidates
+  ✔ LLM verified: 5 flagged
+  ✔ Analysis complete: 5 flagged
 
                   ╔══════════════════════════════════════════╗
                   ║   Hate Speech Analysis Report            ║
                   ╚══════════════════════════════════════════╝
 
   Source     video.mp4
-  Duration   00:12:34
+  Duration   00:00:53
   Model      large-v3
-  Segments   45 analyzed, 3 flagged
+  Segments   13 analyzed, 5 flagged
 
-──── Flagged Segments (3) ──────────────────────────────────
+╭─ Timeline ───────────────────────────────────────────────╮
+│ 00:00                                         00:00:53   │
+│ ████████████████████░░░░░░████████████████████████████    │
+│ █ high  █ mid  █ low  █ clean                            │
+╰──────────────────────────────────────────────────────────╯
 
-╭─ 00:00:42 → 00:00:44 ──────────────── score: 0.70 ──────╮
+──── Flagged Segments (5) ──────────────────────────────────
+
+╭─ 00:00:33 → 00:00:41 ──────────────── score: 0.92 ──────╮
 │                                                           │
-│  "Não fazem nada."                                       │
+│  "Olha, o afrodescendente mais leve lá pesava sete       │
+│   arrobas."                                               │
 │                                                           │
-│  Scored with context:                                     │
-│  "O afrodescendente mais leve pesava sete arrobas.       │
-│  Não fazem nada. Vivem de bolsa do governo."             │
+│  LLM reasoning: Uses "arrobas" (a unit for weighing      │
+│  cattle) to describe Black people, dehumanizing them      │
+│  by equating them with livestock.                         │
+│    embedding pre-filter: 0.39                             │
 │                                                           │
-│  racism               0.70 ██████████████░░░░░░          │
-│  xenophobia           0.36 ███████░░░░░░░░░░░░░          │
-│  sexism               0.12 ██░░░░░░░░░░░░░░░░░░          │
+│  racism               0.92 ██████████████████░░          │
+│  ableism              0.15 ███░░░░░░░░░░░░░░░░░          │
 │                                                           │
-╰───────────────────────────────────── score: 0.70 ────────╯
+╰───────────────────────────────────── score: 0.92 ────────╯
 ```
 
 ## Categories detected
@@ -152,9 +207,10 @@ hate-speech-detector
 | Stage | Model | Size | Purpose |
 |---|---|---|---|
 | Transcription | [Whisper](https://github.com/openai/whisper) (via mlx-whisper) | 39M–1.5B params | Speech-to-text with timestamps |
-| Classification | [mDeBERTa-v3-base-xnli](https://huggingface.co/MoritzLaurer/mDeBERTa-v3-base-xnli-multilingual-nli-2mil7) | 279M params | Multilingual zero-shot NLI |
+| Embedding pre-filter | [paraphrase-multilingual-mpnet-base-v2](https://huggingface.co/sentence-transformers/paraphrase-multilingual-mpnet-base-v2) | 278M params | Multilingual sentence embeddings |
+| LLM verification | [Claude Haiku](https://www.anthropic.com) | — | Reasoning-based hate speech analysis |
 
-Both models are downloaded from Hugging Face on first run and cached locally.
+Whisper and the sentence-transformer are downloaded from Hugging Face on first run and cached locally. Claude Haiku requires an API key.
 
 ## Development
 
@@ -166,7 +222,7 @@ uv sync --group dev
 uv run pytest tests/ -v
 
 # Run a single test file
-uv run pytest tests/test_classifier.py -v
+uv run pytest tests/test_llm_verifier.py -v
 ```
 
 ## Architecture
@@ -174,10 +230,11 @@ uv run pytest tests/test_classifier.py -v
 ```
 src/hate_speech_detector/
 ├── cli.py           # Entry point, argument parsing, pipeline orchestration
-├── extractor.py     # Video → audio extraction via ffmpeg
+├── extractor.py     # Video/URL → audio extraction via ffmpeg/yt-dlp
 ├── transcriber.py   # Audio → timestamped text segments via Whisper
-├── classifier.py    # Text → hate speech scores via zero-shot NLI
-├── reporter.py      # Scores → formatted terminal/JSON reports
+├── classifier.py    # Text → embedding scores via sentence-transformers
+├── llm_verifier.py  # Embedding candidates → LLM-verified verdicts via Claude
+├── reporter.py      # Scores → timeline + formatted terminal/JSON reports
 └── models.py        # Data classes (TranscriptSegment, CategoryScore, etc.)
 ```
 

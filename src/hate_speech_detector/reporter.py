@@ -28,6 +28,56 @@ def _score_style(score: float) -> str:
     return "green"
 
 
+def _build_timeline(report: AnalysisReport, width: int) -> Text:
+    """Build a horizontal timeline bar showing flagged segments colored by severity."""
+    bar_width = max(20, width - 16)
+    duration = report.duration_seconds
+    if duration <= 0:
+        return Text()
+
+    seconds_per_cell = duration / bar_width
+    flagged = [c for c in report.classifications if c.flagged]
+
+    # Time labels
+    end_label = _format_time(duration)
+    text = Text()
+    text.append("00:00", style="dim")
+    gap = bar_width - 5 - len(end_label)
+    text.append(" " * max(1, gap), style="dim")
+    text.append(end_label, style="dim")
+    text.append("\n")
+
+    # Bar
+    for i in range(bar_width):
+        cell_start = i * seconds_per_cell
+        cell_end = (i + 1) * seconds_per_cell
+        max_score = 0.0
+        hit = False
+        for c in flagged:
+            seg = c.segment
+            if seg.start < cell_end and seg.end > cell_start:
+                hit = True
+                if c.hate_score > max_score:
+                    max_score = c.hate_score
+        if hit:
+            text.append("\u2588", style=_score_style(max_score))
+        else:
+            text.append("\u2588", style="bright_black")
+    text.append("\n")
+
+    # Legend
+    text.append("\u2588", style="bold red")
+    text.append(" high ", style="dim")
+    text.append("\u2588", style="yellow")
+    text.append(" mid  ", style="dim")
+    text.append("\u2588", style="green")
+    text.append(" low  ", style="dim")
+    text.append("\u2588", style="bright_black")
+    text.append(" clean", style="dim")
+
+    return text
+
+
 def _build_segment_text(classification: SegmentClassification) -> Text:
     """Build a Rich Text block for a single segment's details."""
     seg = classification.segment
@@ -36,8 +86,17 @@ def _build_segment_text(classification: SegmentClassification) -> Text:
     # Quoted segment text
     text.append(f'"{seg.text}"', style="bold")
 
-    # Context if flagged
-    if classification.context and classification.flagged:
+    # LLM reasoning
+    if classification.reasoning and classification.flagged:
+        text.append("\n\n")
+        text.append("LLM reasoning: ", style="bold dim")
+        text.append(classification.reasoning, style="italic")
+        if classification.embedding_score > 0:
+            text.append("\n")
+            text.append(f"  embedding pre-filter: {classification.embedding_score:.2f}", style="dim")
+
+    # Context if flagged (show only when no reasoning, to avoid clutter)
+    if classification.context and classification.flagged and not classification.reasoning:
         text.append("\n\n")
         text.append("Scored with context:\n", style="dim")
         text.append(f'"{classification.context}"', style="dim italic")
@@ -124,6 +183,14 @@ def print_report(report: AnalysisReport, verbose: bool = False) -> None:
         console.print("  [green]\u2714 No hate speech detected.[/green]")
         console.print()
         return
+
+    # Timeline
+    if report.duration_seconds > 0:
+        timeline = _build_timeline(report, console.width - 6)
+        console.print(
+            Panel(timeline, title="[dim]Timeline[/dim]", border_style="dim", padding=(0, 1))
+        )
+        console.print()
 
     # Flagged segments
     flagged = [c for c in report.classifications if c.flagged]

@@ -2,45 +2,41 @@ import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
+import torch
 
 from hate_speech_detector.models import TranscriptSegment
-from hate_speech_detector.classifier import CATEGORY_LABELS
+from hate_speech_detector.classifier import CATEGORY_REFERENCES
 
 
-NUM_CATEGORIES = len(CATEGORY_LABELS)
-LABEL_LIST = list(CATEGORY_LABELS.values())
+NUM_CATEGORIES = len(CATEGORY_REFERENCES)
 
 
-def _make_nli_result(text, scores=None):
-    """Create a single mock NLI pipeline result."""
-    if scores is None:
-        scores = [0.1] * NUM_CATEGORIES
-    return {
-        "sequence": text,
-        "labels": LABEL_LIST,
-        "scores": scores,
-    }
+def _mock_encode(texts, **kwargs):
+    """Return deterministic normalized embeddings."""
+    n = len(texts) if isinstance(texts, list) else 1
+    emb = torch.arange(n * 768, dtype=torch.float32).reshape(n, 768)
+    emb = emb / emb.norm(dim=1, keepdim=True)
+    if kwargs.get("convert_to_tensor"):
+        return emb
+    return emb.numpy()
 
 
 @pytest.fixture
-def mock_transformers():
-    """Mock transformers module so no real model is loaded."""
-    mock_tf = MagicMock()
-    mock_clf = MagicMock()
+def mock_sentence_transformers():
+    """Mock sentence_transformers module."""
+    mock_st = MagicMock()
+    mock_model = MagicMock()
+    mock_model.encode.side_effect = _mock_encode
+    mock_st.SentenceTransformer.return_value = mock_model
 
-    def default_classify(texts, **kwargs):
-        if isinstance(texts, str):
-            return _make_nli_result(texts)
-        return [_make_nli_result(t) for t in texts]
+    # Mock util.cos_sim to use the real implementation
+    mock_st.util.cos_sim = lambda a, b: torch.mm(a, b.T)
 
-    mock_clf.side_effect = default_classify
-    mock_tf.pipeline.return_value = mock_clf
-
-    with patch.dict(sys.modules, {"transformers": mock_tf}):
-        yield mock_tf, mock_clf
+    with patch.dict(sys.modules, {"sentence_transformers": mock_st}):
+        yield mock_st, mock_model
 
 
-def _create_classifier(mock_tf, threshold=0.5):
+def _create_classifier(mock_st, threshold=0.20):
     with patch("hate_speech_detector.classifier._select_device", return_value="cpu"):
         with patch("hate_speech_detector.classifier._clean_apple_double_files"):
             from hate_speech_detector.classifier import HateSpeechClassifier
@@ -48,9 +44,9 @@ def _create_classifier(mock_tf, threshold=0.5):
             return HateSpeechClassifier(threshold=threshold, device="cpu")
 
 
-def test_classify_returns_correct_count(mock_transformers):
-    mock_tf, mock_clf = mock_transformers
-    clf = _create_classifier(mock_tf)
+def test_classify_returns_correct_count(mock_sentence_transformers):
+    mock_st, mock_model = mock_sentence_transformers
+    clf = _create_classifier(mock_st)
 
     segments = [
         TranscriptSegment(id=0, start=0.0, end=5.0, text="Hello world."),
@@ -61,21 +57,9 @@ def test_classify_returns_correct_count(mock_transformers):
     assert len(results) == 3
 
 
-def test_classify_categories_sorted_descending(mock_transformers):
-    mock_tf, mock_clf = mock_transformers
-
-    # Return varying scores so sorting can be verified
-    def varying_classify(texts, **kwargs):
-        if isinstance(texts, str):
-            texts = [texts]
-        results = []
-        for t in texts:
-            scores = [0.1 * (i + 1) for i in range(NUM_CATEGORIES)]
-            results.append({"sequence": t, "labels": LABEL_LIST, "scores": scores})
-        return results if len(results) > 1 else results[0]
-
-    mock_clf.side_effect = varying_classify
-    clf = _create_classifier(mock_tf, threshold=0.0)
+def test_classify_categories_sorted_descending(mock_sentence_transformers):
+    mock_st, mock_model = mock_sentence_transformers
+    clf = _create_classifier(mock_st, threshold=0.0)  # flag everything
 
     segments = [TranscriptSegment(id=0, start=0.0, end=5.0, text="Some text.")]
     results = clf.classify(segments)
@@ -85,20 +69,9 @@ def test_classify_categories_sorted_descending(mock_transformers):
     assert scores == sorted(scores, reverse=True)
 
 
-def test_classify_hate_score_is_max_category(mock_transformers):
-    mock_tf, mock_clf = mock_transformers
-
-    def varied_classify(texts, **kwargs):
-        if isinstance(texts, str):
-            texts = [texts]
-        results = []
-        for t in texts:
-            scores = [0.05, 0.15, 0.25, 0.35, 0.45, 0.55][:NUM_CATEGORIES]
-            results.append({"sequence": t, "labels": LABEL_LIST, "scores": scores})
-        return results if len(results) > 1 else results[0]
-
-    mock_clf.side_effect = varied_classify
-    clf = _create_classifier(mock_tf, threshold=0.0)
+def test_classify_hate_score_is_max_similarity(mock_sentence_transformers):
+    mock_st, mock_model = mock_sentence_transformers
+    clf = _create_classifier(mock_st, threshold=0.0)
 
     segments = [TranscriptSegment(id=0, start=0.0, end=5.0, text="Test.")]
     results = clf.classify(segments)
@@ -107,10 +80,24 @@ def test_classify_hate_score_is_max_category(mock_transformers):
     assert abs(results[0].hate_score - max_cat_score) < 1e-6
 
 
-def test_classify_not_flagged_has_empty_categories(mock_transformers):
-    mock_tf, mock_clf = mock_transformers
-    # Default mock returns 0.1 for all categories — below threshold 0.5
-    clf = _create_classifier(mock_tf, threshold=0.5)
+def test_classify_not_flagged_has_empty_categories(mock_sentence_transformers):
+    mock_st, mock_model = mock_sentence_transformers
+
+    # Make segment embedding orthogonal to all category embeddings
+    call_count = [0]
+
+    def orthogonal_encode(texts, **kwargs):
+        call_count[0] += 1
+        n = len(texts) if isinstance(texts, list) else 1
+        if call_count[0] == 1:
+            emb = torch.eye(768)[:n]
+        else:
+            emb = torch.zeros(n, 768)
+            emb[:, 767] = 1.0
+        return emb
+
+    mock_model.encode.side_effect = orthogonal_encode
+    clf = _create_classifier(mock_st, threshold=0.20)
 
     segments = [TranscriptSegment(id=0, start=0.0, end=5.0, text="Clean text.")]
     results = clf.classify(segments)
@@ -119,38 +106,32 @@ def test_classify_not_flagged_has_empty_categories(mock_transformers):
     assert results[0].categories == []
 
 
-def test_classify_all_categories_present(mock_transformers):
-    mock_tf, mock_clf = mock_transformers
-    clf = _create_classifier(mock_tf, threshold=0.0)
+def test_classify_all_categories_present(mock_sentence_transformers):
+    mock_st, mock_model = mock_sentence_transformers
+    clf = _create_classifier(mock_st, threshold=0.0)
 
     segments = [TranscriptSegment(id=0, start=0.0, end=5.0, text="Some text.")]
     results = clf.classify(segments)
 
     category_names = {c.category for c in results[0].categories}
-    expected = set(CATEGORY_LABELS.keys())
+    expected = set(CATEGORY_REFERENCES.keys())
     assert category_names == expected
 
 
-def test_classify_flagged_segment(mock_transformers):
-    mock_tf, mock_clf = mock_transformers
+def test_classify_context_stored_for_middle_segment(mock_sentence_transformers):
+    """Middle segments should have context from neighbors."""
+    mock_st, mock_model = mock_sentence_transformers
+    clf = _create_classifier(mock_st, threshold=0.0)
 
-    def flagged_classify(texts, **kwargs):
-        if isinstance(texts, str):
-            texts = [texts]
-        results = []
-        for t in texts:
-            # First category (racism) scores high
-            scores = [0.92] + [0.05] * (NUM_CATEGORIES - 1)
-            results.append({"sequence": t, "labels": LABEL_LIST, "scores": scores})
-        return results if len(results) > 1 else results[0]
-
-    mock_clf.side_effect = flagged_classify
-    clf = _create_classifier(mock_tf, threshold=0.5)
-
-    segments = [TranscriptSegment(id=0, start=0.0, end=5.0, text="Hateful text.")]
+    segments = [
+        TranscriptSegment(id=0, start=0.0, end=5.0, text="First."),
+        TranscriptSegment(id=1, start=5.0, end=10.0, text="Middle."),
+        TranscriptSegment(id=2, start=10.0, end=15.0, text="Last."),
+    ]
     results = clf.classify(segments)
 
-    assert results[0].flagged
-    assert results[0].hate_score == pytest.approx(0.92)
-    assert len(results[0].categories) == NUM_CATEGORIES
-    assert results[0].categories[0].category == "racism"
+    # Middle segment should have context with neighbors
+    assert results[1].context == "First. Middle. Last."
+    # First and last have partial context
+    assert "First." in results[0].context
+    assert "Last." in results[2].context

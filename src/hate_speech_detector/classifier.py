@@ -11,22 +11,48 @@ from hate_speech_detector.models import (
     TranscriptSegment,
 )
 
-NLI_MODEL = "MoritzLaurer/mDeBERTa-v3-base-xnli-multilingual-nli-2mil7"
+MODEL_NAME = "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
 
-CATEGORY_LABELS: dict[str, str] = {
-    "racism": "racist speech, racial discrimination, or dehumanization based on race or ethnicity",
-    "sexism": "sexist speech, misogyny, or gender-based discrimination",
-    "homophobia": "homophobic speech or discrimination against LGBTQ people",
-    "religious_intolerance": "religious intolerance or hatred toward religious groups",
-    "ableism": "ableist speech or discrimination against people with disabilities",
-    "xenophobia": "xenophobic speech or hatred toward immigrants and foreigners",
+CATEGORY_REFERENCES: dict[str, list[str]] = {
+    "racism": [
+        "racism, racial discrimination, racial hatred against ethnic groups",
+        "comparing people to animals based on race, dehumanizing people, treating minorities as subhuman",
+        "stereotyping indigenous people as lazy, primitive, or worthless",
+        "complaining about land rights of racial minorities, quilombola communities, or indigenous reserves as a waste",
+        "using livestock or animal terminology to describe people of a certain race",
+        "measuring, weighing, or quantifying people as if they were animals or property",
+        "mocking people's physical features or bodies based on their race or ethnicity",
+    ],
+    "sexism": [
+        "sexism, misogyny, gender discrimination, degrading women",
+        "objectifying women, reducing women to their appearance or bodies",
+        "claiming women are inferior, less capable, or belong in domestic roles",
+    ],
+    "homophobia": [
+        "homophobia, anti-LGBTQ hatred, discrimination based on sexual orientation",
+        "mocking or threatening gay, lesbian, bisexual, or transgender people",
+        "claiming homosexuality is a disease, sin, or abnormality",
+    ],
+    "religious_intolerance": [
+        "religious intolerance, hatred towards religious groups",
+        "attacking people for their faith, mocking religious practices",
+        "blaming social problems on a specific religion or its followers",
+    ],
+    "ableism": [
+        "ableism, discrimination against disabled people, mocking disabilities",
+        "calling people retarded, crippled, or using disability as an insult",
+    ],
+    "xenophobia": [
+        "xenophobia, hatred towards immigrants and foreigners",
+        "blaming immigrants for crime, unemployment, or cultural decline",
+        "calling for deportation or exclusion of foreign-born people",
+        "claiming a nation has been corrupted, weakened, or sold out by outsiders",
+    ],
 }
-
-HYPOTHESIS_TEMPLATE = "This text contains {}."
 
 
 def _clean_apple_double_files() -> None:
-    """Remove macOS Apple Double (._*) files from transformers package.
+    """Remove macOS Apple Double (._*) files from sentence_transformers package.
 
     On external/encrypted APFS volumes, macOS creates ._* resource fork files
     that can cause UnicodeDecodeError when packages scan their own directories.
@@ -34,9 +60,9 @@ def _clean_apple_double_files() -> None:
     if platform.system() != "Darwin" or not shutil.which("dot_clean"):
         return
     try:
-        import transformers
+        import sentence_transformers
 
-        pkg_dir = str(transformers.__path__[0])
+        pkg_dir = str(sentence_transformers.__path__[0])
         subprocess.run(["dot_clean", pkg_dir], capture_output=True, timeout=30)
     except Exception:
         pass
@@ -56,28 +82,59 @@ def _select_device(preferred: str) -> str:
     return preferred
 
 
+def _merge_references(
+    base: dict[str, list[str]], custom: dict[str, list[str]] | None
+) -> dict[str, list[str]]:
+    """Merge custom reference texts into the base references.
+
+    Custom references extend existing categories or add new ones.
+    """
+    if not custom:
+        return base
+    merged = {cat: list(refs) for cat, refs in base.items()}
+    for cat, refs in custom.items():
+        if cat in merged:
+            merged[cat].extend(refs)
+        else:
+            merged[cat] = list(refs)
+    return merged
+
+
 class HateSpeechClassifier:
-    def __init__(self, threshold: float = 0.5, device: str = "mps", batch_size: int = 8):
+    def __init__(
+        self,
+        threshold: float = 0.20,
+        device: str = "mps",
+        batch_size: int = 16,
+        custom_references: dict[str, list[str]] | None = None,
+    ):
         self.threshold = threshold
         self.batch_size = batch_size
 
         _clean_apple_double_files()
-
-        from transformers import pipeline as transformers_pipeline
+        from sentence_transformers import SentenceTransformer
 
         resolved_device = _select_device(device)
 
-        self._classifier = transformers_pipeline(
-            "zero-shot-classification",
-            model=NLI_MODEL,
-            device=resolved_device,
+        self._model = SentenceTransformer(MODEL_NAME, device=resolved_device)
+
+        # Merge built-in + custom references, then flatten
+        references = _merge_references(CATEGORY_REFERENCES, custom_references)
+        self._categories = list(references.keys())
+        self._ref_categories: list[str] = []
+        all_refs: list[str] = []
+        for cat, refs in references.items():
+            for ref in refs:
+                self._ref_categories.append(cat)
+                all_refs.append(ref)
+
+        self._ref_embeddings = self._model.encode(
+            all_refs, convert_to_tensor=True, normalize_embeddings=True
         )
 
-        self._categories = list(CATEGORY_LABELS.keys())
-        self._labels = list(CATEGORY_LABELS.values())
-        self._label_to_category = {label: cat for cat, label in CATEGORY_LABELS.items()}
-
     def classify(self, segments: list[TranscriptSegment]) -> list[SegmentClassification]:
+        from sentence_transformers import util
+
         texts = [seg.text for seg in segments]
         total = len(segments)
 
@@ -92,24 +149,26 @@ class HateSpeechClassifier:
                 parts.append(texts[i + 1])
             contextualized.append(" ".join(parts))
 
-        nli_results = self._classifier(
+        # Encode contextualized segment texts
+        segment_embeddings = self._model.encode(
             contextualized,
-            candidate_labels=self._labels,
-            hypothesis_template=HYPOTHESIS_TEMPLATE,
-            multi_label=True,
+            convert_to_tensor=True,
+            normalize_embeddings=True,
             batch_size=self.batch_size,
+            show_progress_bar=False,
         )
 
-        # Single result comes as a dict, not a list
-        if isinstance(nli_results, dict):
-            nli_results = [nli_results]
+        # Cosine similarity: (num_segments, num_all_references)
+        similarity_matrix = util.cos_sim(segment_embeddings, self._ref_embeddings)
 
         results: list[SegmentClassification] = []
-        for segment, nli_result, ctx_text in zip(segments, nli_results, contextualized):
+        for i, segment in enumerate(segments):
+            # For each category, take max similarity across its reference embeddings
             cat_scores: dict[str, float] = {}
-            for label, score in zip(nli_result["labels"], nli_result["scores"]):
-                cat_name = self._label_to_category[label]
-                cat_scores[cat_name] = score
+            for j, cat in enumerate(self._ref_categories):
+                score = float(similarity_matrix[i][j])
+                if cat not in cat_scores or score > cat_scores[cat]:
+                    cat_scores[cat] = score
 
             hate_score = max(cat_scores.values())
             flagged = hate_score >= self.threshold
@@ -121,6 +180,7 @@ class HateSpeechClassifier:
             )
 
             # Store context only when it differs from the segment text
+            ctx_text = contextualized[i]
             context = ctx_text if ctx_text != segment.text else ""
 
             results.append(

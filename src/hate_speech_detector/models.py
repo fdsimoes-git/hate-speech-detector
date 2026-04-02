@@ -31,6 +31,8 @@ class SegmentClassification:
     flagged: bool
     categories: list[CategoryScore] = field(default_factory=list)
     context: str = ""
+    reasoning: str = ""
+    embedding_score: float = 0.0
 
     def to_dict(self) -> dict:
         d = {
@@ -41,6 +43,10 @@ class SegmentClassification:
         }
         if self.context:
             d["context"] = self.context
+        if self.reasoning:
+            d["reasoning"] = self.reasoning
+        if self.embedding_score > 0:
+            d["embedding_score"] = self.embedding_score
         return d
 
 

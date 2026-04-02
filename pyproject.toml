@@ -6,10 +6,10 @@ requires-python = ">=3.11"
 # System requirement: ffmpeg must be installed (brew install ffmpeg)
 dependencies = [
     "mlx-whisper>=0.4.0",
-    "transformers>=4.40.0",
+    "sentence-transformers>=3.0.0,<4.0",
     "torch>=2.2.0",
-    "sentencepiece>=0.2.0",
     "rich>=13.0.0",
+    "anthropic>=0.40.0",
 ]
 
 [project.scripts]
