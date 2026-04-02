@@ -212,6 +212,56 @@ hate-speech-detector
 
 Whisper and the sentence-transformer are downloaded from Hugging Face on first run and cached locally. Claude Haiku requires an API key.
 
+## Server Mode
+
+Run as an HTTP API server so other machines on your LAN can submit analysis requests:
+
+```bash
+# Install server dependencies
+uv sync --group server
+
+# Start the server (binds to all interfaces by default)
+hate-speech-detector serve
+
+# Custom host/port
+hate-speech-detector serve --host 0.0.0.0 --port 9000
+
+# Force CPU
+hate-speech-detector serve --device cpu
+```
+
+The server exposes:
+- `GET /health` — health check
+- `POST /analyze` — analyze a video (file upload or URL)
+- `GET /docs` — interactive API documentation (Swagger UI)
+
+### API usage examples
+
+```bash
+# Analyze a YouTube URL
+curl -X POST http://192.168.1.x:8000/analyze \
+  -F "url=https://www.youtube.com/watch?v=VIDEO_ID" \
+  -F "language=pt" \
+  -F "model=large-v3" \
+  -F "verify=true"
+
+# Upload a video file
+curl -X POST http://192.168.1.x:8000/analyze \
+  -F "file=@video.mp4" \
+  -F "language=en" \
+  -F "verify=true"
+```
+
+The response is the same JSON structure as `--json` output.
+
+### Server options
+
+| Option | Description | Default |
+|---|---|---|
+| `--host` | Bind address | `0.0.0.0` |
+| `--port` | Port | `8000` |
+| `--device` | Compute device: `mps` or `cpu` | `mps` |
+
 ## Development
 
 ```bash
@@ -229,7 +279,9 @@ uv run pytest tests/test_llm_verifier.py -v
 
 ```
 src/hate_speech_detector/
-├── cli.py           # Entry point, argument parsing, pipeline orchestration
+├── cli.py           # Entry point, argument parsing, serve command
+├── pipeline.py      # Core analysis pipeline (shared by CLI and server)
+├── server.py        # FastAPI HTTP server for LAN access
 ├── extractor.py     # Video/URL → audio extraction via ffmpeg/yt-dlp
 ├── transcriber.py   # Audio → timestamped text segments via Whisper
 ├── classifier.py    # Text → embedding scores via sentence-transformers

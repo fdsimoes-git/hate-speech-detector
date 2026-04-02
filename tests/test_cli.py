@@ -4,7 +4,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from hate_speech_detector.cli import _is_url, main
+from hate_speech_detector.cli import main
+from hate_speech_detector.pipeline import _is_url
 
 
 def test_is_url():

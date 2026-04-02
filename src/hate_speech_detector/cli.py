@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import gc
 import json
 import shutil
 import sys
@@ -9,16 +8,10 @@ from pathlib import Path
 
 from rich.console import Console
 
-from hate_speech_detector.extractor import extract_audio
-from hate_speech_detector.models import AnalysisReport
+from hate_speech_detector.pipeline import _is_url
 from hate_speech_detector.reporter import print_report, write_json
 
 err = Console(stderr=True, highlight=False)
-
-
-def _is_url(value: str) -> bool:
-    """Check if a string looks like a URL."""
-    return value.startswith(("http://", "https://"))
 
 
 def _load_custom_references(path: Path) -> dict[str, list[str]]:
@@ -35,7 +28,27 @@ def _load_custom_references(path: Path) -> dict[str, list[str]]:
     return data
 
 
-def main() -> None:
+def _parse_serve_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="hate-speech-detector serve",
+        description="Start the HTTP API server.",
+    )
+    parser.add_argument(
+        "--host", type=str, default="0.0.0.0",
+        help="Bind address (default: 0.0.0.0)",
+    )
+    parser.add_argument(
+        "--port", type=int, default=8000,
+        help="Port (default: 8000)",
+    )
+    parser.add_argument(
+        "--device", choices=["mps", "cpu"], default="mps",
+        help="Compute device (default: mps)",
+    )
+    return parser.parse_args(sys.argv[2:])
+
+
+def _parse_analyze_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="hate-speech-detector",
         description="Analyze video files for hate speech content.",
@@ -45,60 +58,56 @@ def main() -> None:
         "--model",
         choices=["tiny", "small", "medium", "large-v3"],
         default="small",
-        help="Whisper model size (default: small). Use 'medium' or 'large-v3' for better non-English transcription.",
+        help="Whisper model size (default: small)",
     )
     parser.add_argument(
-        "--language",
-        type=str,
-        default=None,
+        "--language", type=str, default=None,
         help="Language code for transcription (e.g., 'pt', 'en', 'es'). Default: auto-detect.",
     )
     parser.add_argument(
-        "--threshold",
-        type=float,
-        default=0.20,
+        "--threshold", type=float, default=0.20,
         help="Hate speech detection threshold 0.0-1.0 (default: 0.20)",
     )
     parser.add_argument(
-        "--references",
-        type=Path,
-        default=None,
+        "--references", type=Path, default=None,
         help="JSON file with custom reference texts to extend or add categories",
     )
     parser.add_argument(
-        "--json",
-        dest="json_output",
-        type=Path,
-        default=None,
+        "--json", dest="json_output", type=Path, default=None,
         help="Write full JSON report to file",
     )
     parser.add_argument(
-        "--verify",
-        action="store_true",
-        help="Use Claude LLM to verify flagged segments. "
-        "Uses `claude` CLI by default (your Claude subscription), "
-        "or pass --api-key for direct API access.",
+        "--verify", action="store_true",
+        help="Use Claude LLM to verify flagged segments.",
     )
     parser.add_argument(
-        "--api-key",
-        type=str,
-        default=None,
+        "--api-key", type=str, default=None,
         help="Anthropic API key for --verify. If omitted, uses the `claude` CLI instead.",
     )
     parser.add_argument(
-        "--verbose",
-        action="store_true",
+        "--verbose", action="store_true",
         help="Show all segments, not just flagged ones",
     )
     parser.add_argument(
-        "--device",
-        choices=["mps", "cpu"],
-        default="mps",
+        "--device", choices=["mps", "cpu"], default="mps",
         help="Compute device (default: mps)",
     )
+    return parser.parse_args()
 
-    args = parser.parse_args()
 
+def main() -> None:
+    # Check if first arg is the "serve" subcommand
+    if len(sys.argv) >= 2 and sys.argv[1] == "serve":
+        args = _parse_serve_args()
+        _run_serve(args)
+        return
+
+    args = _parse_analyze_args()
+    _run_analyze(args)
+
+
+def _run_analyze(args: argparse.Namespace) -> None:
+    """Run the CLI analysis pipeline."""
     is_url = _is_url(args.video_file)
 
     if is_url:
@@ -136,84 +145,55 @@ def main() -> None:
     err.print("[bold]hate-speech-detector[/bold]")
     err.print()
 
-    # Step 1: Extract audio
-    if is_url:
-        from hate_speech_detector.extractor import extract_audio_from_url
+    from hate_speech_detector.pipeline import analyze
 
-        with err.status("  Downloading and extracting audio\u2026"):
-            audio_path = extract_audio_from_url(args.video_file)
-        err.print("  [green]\u2714[/green] Audio downloaded and extracted")
-    else:
-        with err.status("  Extracting audio\u2026"):
-            audio_path = extract_audio(video_path)
-        err.print("  [green]\u2714[/green] Audio extracted")
-
-    # Step 2: Transcribe
-    with err.status(f"  Transcribing with Whisper ([bold]{args.model}[/bold])\u2026"):
-        from hate_speech_detector.transcriber import transcribe
-
-        segments = transcribe(audio_path, model_name=args.model, language=args.language)
-    err.print(f"  [green]\u2714[/green] {len(segments)} segments transcribed")
-
-    # Free Whisper model memory before loading classifiers
-    gc.collect()
-
-    # Step 3: Classify
-    with err.status("  Loading classification model\u2026"):
-        from hate_speech_detector.classifier import HateSpeechClassifier
-
-        classifier = HateSpeechClassifier(
+    with err.status("  Analyzing\u2026"):
+        report = analyze(
+            source=args.video_file,
+            model=args.model,
+            language=args.language,
             threshold=args.threshold,
             device=args.device,
+            verify=args.verify,
+            api_key=args.api_key,
             custom_references=custom_references,
         )
-    err.print("  [green]\u2714[/green] Classification model loaded")
 
-    with err.status(f"  Classifying {len(segments)} segments\u2026"):
-        classifications = classifier.classify(segments)
-
-    flagged_count = sum(1 for c in classifications if c.flagged)
-    err.print(f"  [green]\u2714[/green] Embedding pre-filter: [bold]{flagged_count}[/bold] candidates")
-
-    # Step 4: LLM verification (optional)
-    if args.verify:
-        with err.status("  Verifying with Claude LLM\u2026"):
-            from hate_speech_detector.llm_verifier import verify_segments
-
-            classifications = verify_segments(
-                classifications,
-                api_key=args.api_key,
-            )
-        flagged_count = sum(1 for c in classifications if c.flagged)
-        err.print(f"  [green]\u2714[/green] LLM verified: [bold]{flagged_count}[/bold] flagged")
-
-    # Step 5: Build report
-    duration = max((s.end for s in segments), default=0.0)
-    flagged_count = sum(1 for c in classifications if c.flagged)
-
-    err.print(f"  [green]\u2714[/green] Analysis complete: [bold]{flagged_count}[/bold] flagged")
+    err.print(f"  [green]\u2714[/green] Analysis complete: [bold]{report.segments_flagged}[/bold] flagged")
     err.print()
 
-    report = AnalysisReport(
-        source_file=str(args.video_file),
-        duration_seconds=duration,
-        whisper_model=args.model,
-        segments_total=len(segments),
-        segments_flagged=flagged_count,
-        classifications=classifications,
-    )
-
-    # Step 5: Output
     print_report(report, verbose=args.verbose)
 
     if args.json_output:
         write_json(report, args.json_output)
 
-    # Cleanup temp audio
+
+def _run_serve(args: argparse.Namespace) -> None:
+    """Start the HTTP API server."""
     try:
-        audio_path.unlink()
-    except OSError:
-        pass
+        import uvicorn
+    except ImportError:
+        err.print(
+            "[bold red]error:[/bold red] server dependencies not installed.\n"
+            "       Install with: [bold]uv sync --group server[/bold]"
+        )
+        sys.exit(1)
+
+    err.print()
+    err.print("[bold]hate-speech-detector server[/bold]")
+    err.print(f"  Listening on [bold]http://{args.host}:{args.port}[/bold]")
+    err.print(f"  API docs at  [bold]http://{args.host}:{args.port}/docs[/bold]")
+    err.print()
+
+    import os
+    os.environ["HSD_DEVICE"] = args.device
+
+    uvicorn.run(
+        "hate_speech_detector.server:app",
+        host=args.host,
+        port=args.port,
+        log_level="info",
+    )
 
 
 if __name__ == "__main__":
