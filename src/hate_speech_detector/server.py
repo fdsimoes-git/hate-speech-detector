@@ -13,7 +13,7 @@ from hate_speech_detector.pipeline import analyze
 app = FastAPI(
     title="hate-speech-detector",
     description="Analyze video/audio files for hate speech content.",
-    version="0.2.0",
+    version="0.3.0",
 )
 
 

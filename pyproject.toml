@@ -1,6 +1,6 @@
 [project]
 name = "hate-speech-detector"
-version = "0.1.0"
+version = "0.3.0"
 description = "Detect hate speech in video files with timestamped probability reports"
 requires-python = ">=3.11"
 # System requirement: ffmpeg must be installed (brew install ffmpeg)
