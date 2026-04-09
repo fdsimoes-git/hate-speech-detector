@@ -2,7 +2,23 @@
 name = "hate-speech-detector"
 version = "0.3.0"
 description = "Detect hate speech in video files with timestamped probability reports"
+readme = "README.md"
+license = "MIT"
 requires-python = ">=3.11"
+authors = [
+    { name = "Felipe Simoes" },
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia :: Video",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 # System requirement: ffmpeg must be installed (brew install ffmpeg)
 dependencies = [
     "mlx-whisper>=0.4.0",
@@ -11,6 +27,11 @@ dependencies = [
     "rich>=13.0.0",
     "anthropic>=0.40.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/felipesimoes/hate-speech-detector"
+Repository = "https://github.com/felipesimoes/hate-speech-detector"
+Issues = "https://github.com/felipesimoes/hate-speech-detector/issues"
 
 [project.scripts]
 hate-speech-detector = "hate_speech_detector.cli:main"
@@ -21,6 +42,9 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/hate_speech_detector"]
+
+[tool.uv]
+link-mode = "copy"
 
 [dependency-groups]
 dev = [
